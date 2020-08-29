@@ -22,13 +22,13 @@ import (
 
 	"github.com/golang/glog"
 
-	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
 	"github.com/GoogleCloudPlatform/spark-on-k8s-operator/pkg/apis/sparkoperator.k8s.io/v1beta2"
 	"github.com/GoogleCloudPlatform/spark-on-k8s-operator/pkg/config"
 	"github.com/GoogleCloudPlatform/spark-on-k8s-operator/pkg/util"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
 )
 
 const (
@@ -42,7 +42,7 @@ type patchOperation struct {
 	Value interface{} `json:"value,omitempty"`
 }
 
-func patchSparkPod(pod *corev1.Pod, app *v1beta2.SparkApplication) []patchOperation {
+func patchSparkPod(pod *corev1.Pod, app *v1beta2.SparkApplication, client kubernetes.Interface) []patchOperation {
 	var patchOps []patchOperation
 
 	if util.IsDriverPod(pod) {
@@ -51,7 +51,7 @@ func patchSparkPod(pod *corev1.Pod, app *v1beta2.SparkApplication) []patchOperat
 
 	patchOps = append(patchOps, addVolumes(pod, app)...)
 	patchOps = append(patchOps, addGeneralConfigMaps(pod, app)...)
-	patchOps = append(patchOps, addSparkConfigMap(pod, app)...)
+	patchOps = append(patchOps, addSparkConfigMap(pod, app, client)...)
 	patchOps = append(patchOps, addHadoopConfigMap(pod, app)...)
 	patchOps = append(patchOps, getPrometheusConfigPatches(pod, app)...)
 	patchOps = append(patchOps, addTolerations(pod, app)...)
@@ -289,22 +289,45 @@ func addEnvironmentVariable(pod *corev1.Pod, envName, envValue string) *patchOpe
 	return &patchOperation{Op: "add", Path: path, Value: value}
 }
 
-func addSparkConfigMap(pod *corev1.Pod, app *v1beta2.SparkApplication) []patchOperation {
+func addSparkConfigMap(pod *corev1.Pod, app *v1beta2.SparkApplication, client kubernetes.Interface) []patchOperation {
 	var patchOps []patchOperation
 	sparkConfigMapName := app.Spec.SparkConfigMap
 	if sparkConfigMapName != nil {
+		// TODO: Patch existing spark configmap to use subpath.
+		i := findContainer(pod)
+		glog.V(2).Infof("Existing spark configmaps %v", pod.Spec.Containers[i].VolumeMounts)
+		mountIndex := findVolumeMountIndex(&pod.Spec.Containers[i])
+		if mountIndex >= 0 {
+			// Change existing mount configuration to spark.properties
+			glog.V(2).Infof("Replacing VolumeMount in %v", mountIndex)
+			mnt := pod.Spec.Containers[i].VolumeMounts[mountIndex]
+			propertiesfile := "spark.properties"
+			mnt.MountPath = mnt.MountPath + "/" + propertiesfile
+			mnt.SubPath = propertiesfile
+			replaceMountPath := fmt.Sprintf("/spec/containers/%d/volumeMounts/%d", i, mountIndex)
+			glog.V(2).Infof("New VolumeMount %v", replaceMountPath)
+			patchOps = append(patchOps, patchOperation{Op: "replace", Path: replaceMountPath, Value: mnt})
+		}
+
 		patchOps = append(patchOps, addConfigMapVolume(pod, *sparkConfigMapName, config.SparkConfigMapVolumeName))
-		vmPatchOp := addConfigMapVolumeMount(pod, config.SparkConfigMapVolumeName, config.DefaultSparkConfDir)
-		if vmPatchOp == nil {
-			return nil
+		// TODO: Use subpath from user provided options. Might be a loop since there could be multiple files in configmap
+		// Get config map keys
+		cm, err := client.CoreV1().ConfigMaps(pod.Namespace).Get(*sparkConfigMapName, metav1.GetOptions{})
+		if err == nil {
+			for key := range cm.Data {
+				mountPath := fmt.Sprintf("/opt/spark/conf/%s", key)
+
+				patchOps = append(patchOps, *addConfigMapVolumeMountSubpath(pod, config.SparkConfigMapVolumeName,
+					mountPath, key))
+			}
 		}
-		patchOps = append(patchOps, *vmPatchOp)
-		envPatchOp := addEnvironmentVariable(pod, config.SparkConfDirEnvVar, config.DefaultSparkConfDir)
-		if envPatchOp == nil {
-			return nil
-		}
-		patchOps = append(patchOps, *envPatchOp)
 	}
+
+	envPatchOp := addEnvironmentVariable(pod, config.SparkConfDirEnvVar, config.DefaultSparkConfDir)
+	if envPatchOp == nil {
+		return nil
+	}
+	patchOps = append(patchOps, *envPatchOp)
 	return patchOps
 }
 
@@ -773,6 +796,29 @@ func findContainer(pod *corev1.Pod) int {
 			if pod.Spec.Containers[i].Name == name {
 				return i
 			}
+		}
+	}
+	return -1
+}
+
+// Subpath support
+func addConfigMapVolumeMountSubpath(pod *corev1.Pod, configMapVolumeName string, mountPath string, subpath string) *patchOperation {
+	mount := corev1.VolumeMount{
+		Name:      configMapVolumeName,
+		ReadOnly:  true,
+		MountPath: mountPath,
+		SubPath:   subpath,
+	}
+	return addVolumeMount(pod, mount)
+}
+
+func findVolumeMountIndex(container *corev1.Container) int {
+	i := 0
+	// Find the driver or executor container in the pod.
+	for ; i < len(container.VolumeMounts); i++ {
+		glog.V(2).Infof("Processing mount %v(name %v)", container.VolumeMounts[i], container.VolumeMounts[i].Name)
+		if container.VolumeMounts[i].Name == "spark-conf-volume" {
+			return i
 		}
 	}
 	return -1

@@ -275,7 +275,7 @@ func (wh *WebHook) serve(w http.ResponseWriter, r *http.Request) {
 	var reviewResponse *admissionv1beta1.AdmissionResponse
 	switch review.Request.Resource {
 	case podResource:
-		reviewResponse, whErr = mutatePods(review, wh.lister, wh.sparkJobNamespace)
+		reviewResponse, whErr = mutatePods(review, wh.lister, wh.sparkJobNamespace, wh.clientset)
 	case sparkApplicationResource:
 		if !wh.enableResourceQuotaEnforcement {
 			unexpectedResourceType(w, review.Request.Resource.String())
@@ -350,7 +350,6 @@ func denyRequest(w http.ResponseWriter, reason string, code int) {
 func (wh *WebHook) selfRegistration(webhookConfigName string) error {
 	mwcClient := wh.clientset.AdmissionregistrationV1beta1().MutatingWebhookConfigurations()
 	vwcClient := wh.clientset.AdmissionregistrationV1beta1().ValidatingWebhookConfigurations()
-
 	caCert, err := readCertFile(wh.certProvider.caCertFile)
 	if err != nil {
 		return err
@@ -527,7 +526,7 @@ func admitScheduledSparkApplications(review *admissionv1beta1.AdmissionReview, e
 func mutatePods(
 	review *admissionv1beta1.AdmissionReview,
 	lister crdlisters.SparkApplicationLister,
-	sparkJobNs string) (*admissionv1beta1.AdmissionResponse, error) {
+	sparkJobNs string, client kubernetes.Interface) (*admissionv1beta1.AdmissionResponse, error) {
 	raw := review.Request.Object.Raw
 	pod := &corev1.Pod{}
 	if err := json.Unmarshal(raw, pod); err != nil {
@@ -551,7 +550,7 @@ func mutatePods(
 		return nil, fmt.Errorf("failed to get SparkApplication %s/%s: %v", review.Request.Namespace, appName, err)
 	}
 
-	patchOps := patchSparkPod(pod, app)
+	patchOps := patchSparkPod(pod, app, client)
 	if len(patchOps) > 0 {
 		glog.V(2).Infof("Pod %s in namespace %s is subject to mutation", pod.GetObjectMeta().GetName(), review.Request.Namespace)
 		patchBytes, err := json.Marshal(patchOps)
