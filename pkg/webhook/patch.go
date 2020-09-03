@@ -316,10 +316,12 @@ func addSparkConfigMap(pod *corev1.Pod, app *v1beta2.SparkApplication, client ku
 		if err == nil {
 			for key := range cm.Data {
 				mountPath := fmt.Sprintf("/opt/spark/conf/%s", key)
-
+				glog.V(2).Infof("Adding mountPath %v", mountPath)
 				patchOps = append(patchOps, *addConfigMapVolumeMountSubpath(pod, config.SparkConfigMapVolumeName,
 					mountPath, key))
 			}
+		} else {
+			glog.Errorf("Error when getting custom configuration map %v", err)
 		}
 	}
 
