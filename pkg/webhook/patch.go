@@ -293,7 +293,6 @@ func addSparkConfigMap(pod *corev1.Pod, app *v1beta2.SparkApplication, client ku
 	var patchOps []patchOperation
 	sparkConfigMapName := app.Spec.SparkConfigMap
 	if sparkConfigMapName != nil {
-		// TODO: Patch existing spark configmap to use subpath.
 		i := findContainer(pod)
 		glog.V(2).Infof("Existing spark configmaps %v", pod.Spec.Containers[i].VolumeMounts)
 		mountIndex := findVolumeMountIndex(&pod.Spec.Containers[i])
@@ -310,7 +309,6 @@ func addSparkConfigMap(pod *corev1.Pod, app *v1beta2.SparkApplication, client ku
 		}
 
 		patchOps = append(patchOps, addConfigMapVolume(pod, *sparkConfigMapName, config.SparkConfigMapVolumeName))
-		// TODO: Use subpath from user provided options. Might be a loop since there could be multiple files in configmap
 		// Get config map keys
 		cm, err := client.CoreV1().ConfigMaps(app.Namespace).Get(*sparkConfigMapName, metav1.GetOptions{})
 		if err == nil {
