@@ -62,6 +62,7 @@ func patchSparkPod(pod *corev1.Pod, app *v1beta2.SparkApplication, client kubern
 	patchOps = append(patchOps, addDNSConfig(pod, app)...)
 	patchOps = append(patchOps, addEnvVars(pod, app)...)
 	patchOps = append(patchOps, addEnvFrom(pod, app)...)
+	patchOps = append(patchOps, addHostAliases(pod, app)...)
 
 	op := addSchedulerName(pod, app)
 	if op != nil {
@@ -398,6 +399,11 @@ func getPrometheusConfigPatches(pod *corev1.Pod, app *v1beta2.SparkApplication) 
 		port = *app.Spec.Monitoring.Prometheus.Port
 	}
 	protocol := config.DefaultPrometheusPortProtocol
+	portName := config.DefaultPrometheusPortName
+	if app.Spec.Monitoring.Prometheus.PortName != nil {
+		portName = *app.Spec.Monitoring.Prometheus.PortName
+	}
+
 	patchOps = append(patchOps, addConfigMapVolume(pod, name, volumeName))
 	vmPatchOp := addConfigMapVolumeMount(pod, volumeName, mountPath)
 	if vmPatchOp == nil {
@@ -405,7 +411,7 @@ func getPrometheusConfigPatches(pod *corev1.Pod, app *v1beta2.SparkApplication) 
 		return nil
 	}
 	patchOps = append(patchOps, *vmPatchOp)
-	portPatchOp := addContainerPort(pod, port, protocol)
+	portPatchOp := addContainerPort(pod, port, protocol, portName)
 	if portPatchOp == nil {
 		glog.Warningf("could not expose port %d to scrape metrics outside the pod", port)
 		return nil
@@ -415,7 +421,7 @@ func getPrometheusConfigPatches(pod *corev1.Pod, app *v1beta2.SparkApplication) 
 	return patchOps
 }
 
-func addContainerPort(pod *corev1.Pod, port int32, protocol string) *patchOperation {
+func addContainerPort(pod *corev1.Pod, port int32, protocol string, portName string) *patchOperation {
 	i := findContainer(pod)
 	if i < 0 {
 		glog.Warningf("not able to add containerPort %d as Spark container was not found in pod %s", port, pod.Name)
@@ -424,6 +430,7 @@ func addContainerPort(pod *corev1.Pod, port int32, protocol string) *patchOperat
 
 	path := fmt.Sprintf("/spec/containers/%d/ports", i)
 	containerPort := corev1.ContainerPort{
+		Name:          portName,
 		ContainerPort: port,
 		Protocol:      corev1.Protocol(protocol),
 	}
@@ -822,4 +829,29 @@ func findVolumeMountIndex(container *corev1.Container) int {
 		}
 	}
 	return -1
+}
+
+func addHostAliases(pod *corev1.Pod, app *v1beta2.SparkApplication) []patchOperation {
+	var hostAliases []corev1.HostAlias
+	if util.IsDriverPod(pod) {
+		hostAliases = app.Spec.Driver.HostAliases
+	} else if util.IsExecutorPod(pod) {
+		hostAliases = app.Spec.Executor.HostAliases
+	}
+
+	first := false
+	if len(pod.Spec.HostAliases) == 0 {
+		first = true
+	}
+
+	var ops []patchOperation
+	for _, v := range hostAliases {
+		if first {
+			ops = append(ops, patchOperation{Op: "add", Path: "/spec/hostAliases", Value: []corev1.HostAlias{v}})
+			first = false
+		} else {
+			ops = append(ops, patchOperation{Op: "add", Path: "/spec/hostAliases/-", Value: &v})
+		}
+	}
+	return ops
 }

@@ -306,6 +306,9 @@ type SparkUIConfiguration struct {
 	// TargetPort should be the same as the one defined in spark.ui.port
 	// +optional
 	ServicePort *int32 `json:"servicePort"`
+	// ServiceType allows configuring the type of the service. Defaults to ClusterIP.
+	// +optional
+	ServiceType *apiv1.ServiceType `json:"serviceType"`
 	// IngressAnnotations is a map of key,value pairs of annotations that might be added to the ingress object. i.e. specify nginx as ingress.class
 	// +optional
 	IngressAnnotations map[string]string `json:"ingressAnnotations,omitempty"`
@@ -512,6 +515,9 @@ type SparkPodSpec struct {
 	// ServiceAccount is the name of the custom Kubernetes service account used by the pod.
 	// +optional
 	ServiceAccount *string `json:"serviceAccount,omitempty"`
+	// HostAliases settings for the pod, following the Kubernetes specifications.
+	// +optional
+	HostAliases []apiv1.HostAlias `json:"hostAliases,omitempty"`
 }
 
 // DriverSpec is specification of the driver.
@@ -642,6 +648,10 @@ type PrometheusSpec struct {
 	// +kubebuilder:validation:Maximum=49151
 	// +optional
 	Port *int32 `json:"port,omitempty"`
+	// PortName is the port name of prometheus JMX exporter port.
+	// If not specified, jmx-exporter will be used as the default.
+	// +optional
+	PortName *string `json:"portName,omitempty"`
 	// ConfigFile is the path to the custom Prometheus configuration file provided in the Spark image.
 	// ConfigFile takes precedence over Configuration, which is shown below.
 	// +optional

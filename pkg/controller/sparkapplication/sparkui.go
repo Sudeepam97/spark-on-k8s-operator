@@ -17,6 +17,7 @@ limitations under the License.
 package sparkapplication
 
 import (
+	"context"
 	"fmt"
 	"net/url"
 	"regexp"
@@ -49,6 +50,7 @@ func getSparkUIingressURL(ingressURLFormat string, appName string, appNamespace 
 // SparkService encapsulates information about the driver UI service.
 type SparkService struct {
 	serviceName string
+	serviceType apiv1.ServiceType
 	servicePort int32
 	targetPort  intstr.IntOrString
 	serviceIP   string
@@ -114,7 +116,7 @@ func createSparkUIIngress(app *v1beta2.SparkApplication, service SparkService, i
 		ingress.Spec.TLS = ingressTlsHosts
 	}
 	glog.Infof("Creating an Ingress %s for the Spark UI for application %s", ingress.Name, app.Name)
-	_, err = kubeClient.ExtensionsV1beta1().Ingresses(ingress.Namespace).Create(&ingress)
+	_, err = kubeClient.ExtensionsV1beta1().Ingresses(ingress.Namespace).Create(context.TODO(), &ingress, metav1.CreateOptions{})
 
 	if err != nil {
 		return nil, err
@@ -160,18 +162,19 @@ func createSparkUIService(
 				config.SparkAppNameLabel: app.Name,
 				config.SparkRoleLabel:    config.SparkDriverRole,
 			},
-			Type: apiv1.ServiceTypeClusterIP,
+			Type: getUIServiceType(app),
 		},
 	}
 
 	glog.Infof("Creating a service %s for the Spark UI for application %s", service.Name, app.Name)
-	service, err = kubeClient.CoreV1().Services(app.Namespace).Create(service)
+	service, err = kubeClient.CoreV1().Services(app.Namespace).Create(context.TODO(), service, metav1.CreateOptions{})
 	if err != nil {
 		return nil, err
 	}
 
 	return &SparkService{
 		serviceName: service.Name,
+		serviceType: service.Spec.Type,
 		servicePort: service.Spec.Ports[0].Port,
 		targetPort:  service.Spec.Ports[0].TargetPort,
 		serviceIP:   service.Spec.ClusterIP,

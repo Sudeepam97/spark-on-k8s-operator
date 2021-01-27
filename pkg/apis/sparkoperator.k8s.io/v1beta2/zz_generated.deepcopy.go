@@ -348,6 +348,11 @@ func (in *PrometheusSpec) DeepCopyInto(out *PrometheusSpec) {
 		*out = new(int32)
 		**out = **in
 	}
+	if in.PortName != nil {
+		in, out := &in.PortName, &out.PortName
+		*out = new(string)
+		**out = **in
+	}
 	if in.ConfigFile != nil {
 		in, out := &in.ConfigFile, &out.ConfigFile
 		*out = new(string)
@@ -935,6 +940,13 @@ func (in *SparkPodSpec) DeepCopyInto(out *SparkPodSpec) {
 		*out = new(string)
 		**out = **in
 	}
+	if in.HostAliases != nil {
+		in, out := &in.HostAliases, &out.HostAliases
+		*out = make([]v1.HostAlias, len(*in))
+		for i := range *in {
+			(*in)[i].DeepCopyInto(&(*out)[i])
+		}
+	}
 	return
 }
 
@@ -954,6 +966,11 @@ func (in *SparkUIConfiguration) DeepCopyInto(out *SparkUIConfiguration) {
 	if in.ServicePort != nil {
 		in, out := &in.ServicePort, &out.ServicePort
 		*out = new(int32)
+		**out = **in
+	}
+	if in.ServiceType != nil {
+		in, out := &in.ServiceType, &out.ServiceType
+		*out = new(v1.ServiceType)
 		**out = **in
 	}
 	if in.IngressAnnotations != nil {

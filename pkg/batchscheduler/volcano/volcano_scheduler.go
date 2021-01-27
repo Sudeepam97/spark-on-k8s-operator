@@ -17,6 +17,7 @@ limitations under the License.
 package volcano
 
 import (
+	"context"
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
@@ -75,12 +76,10 @@ func (v *VolcanoBatchScheduler) DoBatchSchedulingOnSubmission(app *v1beta2.Spark
 func (v *VolcanoBatchScheduler) syncPodGroupInClientMode(app *v1beta2.SparkApplication) error {
 	// We only care about the executor pods in client mode
 	if _, ok := app.Spec.Executor.Annotations[v1beta1.KubeGroupNameAnnotationKey]; !ok {
-		var totalResource corev1.ResourceList
-		requestResources := app.Spec.BatchSchedulerOptions.Resources
-		if len(requestResources) > 0 {
-			totalResource = requestResources
-		} else {
-			totalResource = getExecutorRequestResource(app)
+		totalResource := getExecutorRequestResource(app)
+
+		if app.Spec.BatchSchedulerOptions != nil && len(app.Spec.BatchSchedulerOptions.Resources) > 0 {
+			totalResource = app.Spec.BatchSchedulerOptions.Resources
 		}
 		if err := v.syncPodGroup(app, 1, totalResource); err == nil {
 			app.Spec.Executor.Annotations[v1beta1.KubeGroupNameAnnotationKey] = v.getAppPodGroupName(app)
@@ -97,9 +96,9 @@ func (v *VolcanoBatchScheduler) syncPodGroupInClusterMode(app *v1beta2.SparkAppl
 	if _, ok := app.Spec.Driver.Annotations[v1beta1.KubeGroupNameAnnotationKey]; !ok {
 		//Both driver and executor resource will be considered.
 		totalResource := sumResourceList([]corev1.ResourceList{getExecutorRequestResource(app), getDriverRequestResource(app)})
-		requestResources := app.Spec.BatchSchedulerOptions.Resources
-		if len(requestResources) > 0 {
-			totalResource = requestResources
+
+		if app.Spec.BatchSchedulerOptions != nil && len(app.Spec.BatchSchedulerOptions.Resources) > 0 {
+			totalResource = app.Spec.BatchSchedulerOptions.Resources
 		}
 		if err := v.syncPodGroup(app, 1, totalResource); err == nil {
 			app.Spec.Executor.Annotations[v1beta1.KubeGroupNameAnnotationKey] = v.getAppPodGroupName(app)
@@ -118,7 +117,7 @@ func (v *VolcanoBatchScheduler) getAppPodGroupName(app *v1beta2.SparkApplication
 func (v *VolcanoBatchScheduler) syncPodGroup(app *v1beta2.SparkApplication, size int32, minResource corev1.ResourceList) error {
 	var err error
 	podGroupName := v.getAppPodGroupName(app)
-	if pg, err := v.volcanoClient.SchedulingV1beta1().PodGroups(app.Namespace).Get(podGroupName, metav1.GetOptions{}); err != nil {
+	if pg, err := v.volcanoClient.SchedulingV1beta1().PodGroups(app.Namespace).Get(context.TODO(), podGroupName, metav1.GetOptions{}); err != nil {
 		if !errors.IsNotFound(err) {
 			return err
 		}
@@ -149,15 +148,24 @@ func (v *VolcanoBatchScheduler) syncPodGroup(app *v1beta2.SparkApplication, size
 				podGroup.Spec.PriorityClassName = *app.Spec.BatchSchedulerOptions.PriorityClassName
 			}
 		}
-		_, err = v.volcanoClient.SchedulingV1beta1().PodGroups(app.Namespace).Create(&podGroup)
+		_, err = v.volcanoClient.SchedulingV1beta1().PodGroups(app.Namespace).Create(context.TODO(), &podGroup, metav1.CreateOptions{})
 	} else {
 		if pg.Spec.MinMember != size {
 			pg.Spec.MinMember = size
-			_, err = v.volcanoClient.SchedulingV1beta1().PodGroups(app.Namespace).Update(pg)
+			_, err = v.volcanoClient.SchedulingV1beta1().PodGroups(app.Namespace).Update(context.TODO(), pg, metav1.UpdateOptions{})
 		}
 	}
 	if err != nil {
 		return fmt.Errorf("failed to sync PodGroup with error: %s. Abandon schedule pods via volcano", err)
+	}
+	return nil
+}
+
+func (v *VolcanoBatchScheduler) CleanupOnCompletion(app *v1beta2.SparkApplication) error {
+	podGroupName := v.getAppPodGroupName(app)
+	err := v.volcanoClient.SchedulingV1beta1().PodGroups(app.Namespace).Delete(context.TODO(), podGroupName, metav1.DeleteOptions{})
+	if err != nil && !errors.IsNotFound(err) {
+		return err
 	}
 	return nil
 }
@@ -173,7 +181,10 @@ func New(config *rest.Config) (schedulerinterface.BatchScheduler, error) {
 	}
 
 	if _, err := extClient.ApiextensionsV1beta1().CustomResourceDefinitions().Get(
-		PodGroupName, metav1.GetOptions{}); err != nil {
+		context.TODO(),
+		PodGroupName,
+		metav1.GetOptions{},
+	); err != nil {
 		return nil, fmt.Errorf("podGroup CRD is required to exists in current cluster error: %s", err)
 	}
 	return &VolcanoBatchScheduler{

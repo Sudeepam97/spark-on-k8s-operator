@@ -17,6 +17,7 @@ limitations under the License.
 package sparkapplication
 
 import (
+	"context"
 	"fmt"
 	"os/exec"
 	"time"
@@ -293,7 +294,7 @@ func (c *Controller) getDriverPod(app *v1beta2.SparkApplication) (*apiv1.Pod, er
 	}
 
 	// The driver pod was not found in the informer cache, try getting it directly from the API server.
-	pod, err = c.kubeClient.CoreV1().Pods(app.Namespace).Get(app.Status.DriverInfo.PodName, metav1.GetOptions{})
+	pod, err = c.kubeClient.CoreV1().Pods(app.Namespace).Get(context.TODO(), app.Status.DriverInfo.PodName, metav1.GetOptions{})
 	if err == nil {
 		return pod, nil
 	}
@@ -395,15 +396,19 @@ func (c *Controller) getAndUpdateExecutorState(app *v1beta2.SparkApplication) er
 	// Handle missing/deleted executors.
 	for name, oldStatus := range app.Status.ExecutorState {
 		_, exists := executorStateMap[name]
-		if !isExecutorTerminated(oldStatus) && !exists && !isDriverRunning(app) {
-			// If ApplicationState is SUCCEEDING, in other words, the driver pod has been completed
-			// successfully. The executor pods terminate and are cleaned up, so we could not found
-			// the executor pod, under this circumstances, we assume the executor pod are completed.
-			if app.Status.AppState.State == v1beta2.SucceedingState {
-				app.Status.ExecutorState[name] = v1beta2.ExecutorCompletedState
+		if !isExecutorTerminated(oldStatus) && !exists {
+			if !isDriverRunning(app) {
+				// If ApplicationState is COMPLETED, in other words, the driver pod has been completed
+				// successfully. The executor pods terminate and are cleaned up, so we could not found
+				// the executor pod, under this circumstances, we assume the executor pod are completed.
+				if app.Status.AppState.State == v1beta2.CompletedState {
+					app.Status.ExecutorState[name] = v1beta2.ExecutorCompletedState
+				} else {
+					glog.Infof("Executor pod %s not found, assuming it was deleted.", name)
+					app.Status.ExecutorState[name] = v1beta2.ExecutorFailedState
+				}
 			} else {
-				glog.Infof("Executor pod %s not found, assuming it was deleted.", name)
-				app.Status.ExecutorState[name] = v1beta2.ExecutorFailedState
+				app.Status.ExecutorState[name] = v1beta2.ExecutorUnknownState
 			}
 		}
 	}
@@ -580,11 +585,14 @@ func (c *Controller) syncSparkApplication(key string) error {
 	case v1beta2.CompletedState, v1beta2.FailedState:
 		if c.hasApplicationExpired(app) {
 			glog.Infof("Garbage collecting expired SparkApplication %s/%s", app.Namespace, app.Name)
-			err := c.crdClient.SparkoperatorV1beta2().SparkApplications(app.Namespace).Delete(app.Name, metav1.NewDeleteOptions(0))
+			err := c.crdClient.SparkoperatorV1beta2().SparkApplications(app.Namespace).Delete(context.TODO(), app.Name, metav1.DeleteOptions{GracePeriodSeconds: int64ptr(0)})
 			if err != nil && !errors.IsNotFound(err) {
 				return err
 			}
 			return nil
+		}
+		if err := c.getAndUpdateExecutorState(appCopy); err != nil {
+			return err
 		}
 	}
 
@@ -593,6 +601,14 @@ func (c *Controller) syncSparkApplication(key string) error {
 		if err != nil {
 			glog.Errorf("failed to update SparkApplication %s/%s: %v", app.Namespace, app.Name, err)
 			return err
+		}
+
+		if state := appCopy.Status.AppState.State; state == v1beta2.CompletedState ||
+			state == v1beta2.FailedState {
+			if err := c.cleanUpOnTermination(app, appCopy); err != nil {
+				glog.Errorf("failed to clean up resources for SparkApplication %s/%s: %v", app.Namespace, app.Name, err)
+				return err
+			}
 		}
 	}
 
@@ -727,7 +743,7 @@ func (c *Controller) updateApplicationStatusWithRetries(
 			return true, nil
 		}
 
-		toUpdate, err = c.crdClient.SparkoperatorV1beta2().SparkApplications(original.Namespace).UpdateStatus(toUpdate)
+		toUpdate, err = c.crdClient.SparkoperatorV1beta2().SparkApplications(original.Namespace).UpdateStatus(context.TODO(), toUpdate, metav1.UpdateOptions{})
 		if err == nil {
 			return true, nil
 		}
@@ -736,7 +752,7 @@ func (c *Controller) updateApplicationStatusWithRetries(
 		}
 
 		// There was a conflict updating the SparkApplication, fetch the latest version from the API server.
-		toUpdate, err = c.crdClient.SparkoperatorV1beta2().SparkApplications(original.Namespace).Get(original.Name, metav1.GetOptions{})
+		toUpdate, err = c.crdClient.SparkoperatorV1beta2().SparkApplications(original.Namespace).Get(context.TODO(), original.Name, metav1.GetOptions{})
 		if err != nil {
 			glog.Errorf("failed to get SparkApplication %s/%s: %v", original.Namespace, original.Name, err)
 			return false, err
@@ -807,7 +823,7 @@ func (c *Controller) deleteSparkResources(app *v1beta2.SparkApplication) error {
 	}
 
 	glog.V(2).Infof("Deleting pod %s in namespace %s", driverPodName, app.Namespace)
-	err := c.kubeClient.CoreV1().Pods(app.Namespace).Delete(driverPodName, &metav1.DeleteOptions{})
+	err := c.kubeClient.CoreV1().Pods(app.Namespace).Delete(context.TODO(), driverPodName, metav1.DeleteOptions{})
 	if err != nil && !errors.IsNotFound(err) {
 		return err
 	}
@@ -815,7 +831,7 @@ func (c *Controller) deleteSparkResources(app *v1beta2.SparkApplication) error {
 	sparkUIServiceName := app.Status.DriverInfo.WebUIServiceName
 	if sparkUIServiceName != "" {
 		glog.V(2).Infof("Deleting Spark UI Service %s in namespace %s", sparkUIServiceName, app.Namespace)
-		err := c.kubeClient.CoreV1().Services(app.Namespace).Delete(sparkUIServiceName, metav1.NewDeleteOptions(0))
+		err := c.kubeClient.CoreV1().Services(app.Namespace).Delete(context.TODO(), sparkUIServiceName, metav1.DeleteOptions{GracePeriodSeconds: int64ptr(0)})
 		if err != nil && !errors.IsNotFound(err) {
 			return err
 		}
@@ -824,7 +840,7 @@ func (c *Controller) deleteSparkResources(app *v1beta2.SparkApplication) error {
 	sparkUIIngressName := app.Status.DriverInfo.WebUIIngressName
 	if sparkUIIngressName != "" {
 		glog.V(2).Infof("Deleting Spark UI Ingress %s in namespace %s", sparkUIIngressName, app.Namespace)
-		err := c.kubeClient.ExtensionsV1beta1().Ingresses(app.Namespace).Delete(sparkUIIngressName, metav1.NewDeleteOptions(0))
+		err := c.kubeClient.ExtensionsV1beta1().Ingresses(app.Namespace).Delete(context.TODO(), sparkUIIngressName, metav1.DeleteOptions{GracePeriodSeconds: int64ptr(0)})
 		if err != nil && !errors.IsNotFound(err) {
 			return err
 		}
@@ -852,14 +868,14 @@ func (c *Controller) validateSparkResourceDeletion(app *v1beta2.SparkApplication
 	if driverPodName == "" {
 		driverPodName = getDriverPodName(app)
 	}
-	_, err := c.kubeClient.CoreV1().Pods(app.Namespace).Get(driverPodName, metav1.GetOptions{})
+	_, err := c.kubeClient.CoreV1().Pods(app.Namespace).Get(context.TODO(), driverPodName, metav1.GetOptions{})
 	if err == nil || !errors.IsNotFound(err) {
 		return false
 	}
 
 	sparkUIServiceName := app.Status.DriverInfo.WebUIServiceName
 	if sparkUIServiceName != "" {
-		_, err := c.kubeClient.CoreV1().Services(app.Namespace).Get(sparkUIServiceName, metav1.GetOptions{})
+		_, err := c.kubeClient.CoreV1().Services(app.Namespace).Get(context.TODO(), sparkUIServiceName, metav1.GetOptions{})
 		if err == nil || !errors.IsNotFound(err) {
 			return false
 		}
@@ -867,7 +883,7 @@ func (c *Controller) validateSparkResourceDeletion(app *v1beta2.SparkApplication
 
 	sparkUIIngressName := app.Status.DriverInfo.WebUIIngressName
 	if sparkUIIngressName != "" {
-		_, err := c.kubeClient.ExtensionsV1beta1().Ingresses(app.Namespace).Get(sparkUIIngressName, metav1.GetOptions{})
+		_, err := c.kubeClient.ExtensionsV1beta1().Ingresses(app.Namespace).Get(context.TODO(), sparkUIIngressName, metav1.GetOptions{})
 		if err == nil || !errors.IsNotFound(err) {
 			return false
 		}
@@ -997,4 +1013,18 @@ func (c *Controller) hasApplicationExpired(app *v1beta2.SparkApplication) bool {
 	}
 
 	return false
+}
+
+// Clean up when the spark application is terminated.
+func (c *Controller) cleanUpOnTermination(oldApp, newApp *v1beta2.SparkApplication) error {
+	if needScheduling, scheduler := c.shouldDoBatchScheduling(newApp); needScheduling {
+		if err := scheduler.CleanupOnCompletion(newApp); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func int64ptr(n int64) *int64 {
+	return &n
 }
