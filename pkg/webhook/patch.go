@@ -17,6 +17,7 @@ limitations under the License.
 package webhook
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -311,7 +312,7 @@ func addSparkConfigMap(pod *corev1.Pod, app *v1beta2.SparkApplication, client ku
 
 		patchOps = append(patchOps, addConfigMapVolume(pod, *sparkConfigMapName, config.SparkConfigMapVolumeName))
 		// Get config map keys
-		cm, err := client.CoreV1().ConfigMaps(app.Namespace).Get(*sparkConfigMapName, metav1.GetOptions{})
+		cm, err := client.CoreV1().ConfigMaps(app.Namespace).Get(context.TODO(), *sparkConfigMapName, metav1.GetOptions{})
 		if err == nil {
 			for key := range cm.Data {
 				mountPath := fmt.Sprintf("/opt/spark/conf/%s", key)
