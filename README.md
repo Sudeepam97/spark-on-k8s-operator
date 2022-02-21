@@ -1,4 +1,3 @@
-[![Build Status](https://travis-ci.org/GoogleCloudPlatform/spark-on-k8s-operator.svg?branch=master)](https://travis-ci.org/GoogleCloudPlatform/spark-on-k8s-operator.svg?branch=master)
 [![Go Report Card](https://goreportcard.com/badge/github.com/GoogleCloudPlatform/spark-on-k8s-operator)](https://goreportcard.com/report/github.com/GoogleCloudPlatform/spark-on-k8s-operator)
 
 **This is not an officially supported Google product.**
@@ -21,6 +20,8 @@ Customization of Spark pods, e.g., mounting arbitrary volumes and setting pod af
 ## Prerequisites
 
 * Version >= 1.13 of Kubernetes to use the [`subresource` support for CustomResourceDefinitions](https://kubernetes.io/docs/tasks/access-kubernetes-api/custom-resources/custom-resource-definitions/#subresources), which became beta in 1.13 and is enabled by default in 1.13 and higher.
+
+* Version >= 1.16 of Kubernetes to use the `MutatingWebhook` and `ValidatingWebhook` of `apiVersion: admissionregistration.k8s.io/v1`.
 
 ## Installation
 
@@ -47,6 +48,9 @@ The following table lists the most recent few versions of the operator.
 | Operator Version | API Version | Kubernetes Version | Base Spark Version | Operator Image Tag |
 | ------------- | ------------- | ------------- | ------------- | ------------- |
 | `latest` (master HEAD) | `v1beta2` | 1.13+ | `3.0.0` | `latest` |
+| `v1beta2-1.3.3-3.1.1` | `v1beta2` | 1.16+ | `3.1.1` | `v1beta2-1.3.3-3.1.1` |
+| `v1beta2-1.3.2-3.1.1` | `v1beta2` | 1.16+ | `3.1.1` | `v1beta2-1.3.2-3.1.1` |
+| `v1beta2-1.3.0-3.1.1` | `v1beta2` | 1.16+ | `3.1.1` | `v1beta2-1.3.0-3.1.1` |
 | `v1beta2-1.2.3-3.1.1` | `v1beta2` | 1.13+ | `3.1.1` | `v1beta2-1.2.3-3.1.1` |
 | `v1beta2-1.2.0-3.0.0` | `v1beta2` | 1.13+ | `3.0.0` | `v1beta2-1.2.0-3.0.0` |
 | `v1beta2-1.1.2-2.4.5` | `v1beta2` | 1.13+ | `2.4.5` | `v1beta2-1.1.2-2.4.5` |

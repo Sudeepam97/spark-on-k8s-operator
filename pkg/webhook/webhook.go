@@ -28,10 +28,8 @@ import (
 
 	"github.com/golang/glog"
 
-	admissionv1beta1 "k8s.io/api/admission/v1beta1"
-	"k8s.io/api/admissionregistration/v1beta1"
-	arv1beta1 "k8s.io/api/admissionregistration/v1beta1"
-	apiv1 "k8s.io/api/core/v1"
+	admissionv1 "k8s.io/api/admission/v1"
+	arv1 "k8s.io/api/admissionregistration/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -78,14 +76,15 @@ type WebHook struct {
 	lister                         crdlisters.SparkApplicationLister
 	server                         *http.Server
 	certProvider                   *certProvider
-	serviceRef                     *v1beta1.ServiceReference
-	failurePolicy                  v1beta1.FailurePolicyType
+	serviceRef                     *arv1.ServiceReference
+	failurePolicy                  arv1.FailurePolicyType
 	selector                       *metav1.LabelSelector
 	sparkJobNamespace              string
 	deregisterOnExit               bool
 	enableResourceQuotaEnforcement bool
 	resourceQuotaEnforcer          resourceusage.ResourceQuotaEnforcer
 	coreV1InformerFactory          informers.SharedInformerFactory
+	timeoutSeconds                 *int32
 }
 
 // Configuration parsed from command-line flags
@@ -124,7 +123,8 @@ func New(
 	jobNamespace string,
 	deregisterOnExit bool,
 	enableResourceQuotaEnforcement bool,
-	coreV1InformerFactory informers.SharedInformerFactory) (*WebHook, error) {
+	coreV1InformerFactory informers.SharedInformerFactory,
+	webhookTimeout *int) (*WebHook, error) {
 
 	cert, err := NewCertProvider(
 		userConfig.serverCert,
@@ -137,7 +137,7 @@ func New(
 	}
 
 	path := "/webhook"
-	serviceRef := &v1beta1.ServiceReference{
+	serviceRef := &arv1.ServiceReference{
 		Namespace: userConfig.webhookServiceNamespace,
 		Name:      userConfig.webhookServiceName,
 		Path:      &path,
@@ -150,13 +150,14 @@ func New(
 		serviceRef:                     serviceRef,
 		sparkJobNamespace:              jobNamespace,
 		deregisterOnExit:               deregisterOnExit,
-		failurePolicy:                  arv1beta1.Ignore,
+		failurePolicy:                  arv1.Ignore,
 		coreV1InformerFactory:          coreV1InformerFactory,
 		enableResourceQuotaEnforcement: enableResourceQuotaEnforcement,
+		timeoutSeconds:                 func(b int32) *int32 { return &b }(int32(*webhookTimeout)),
 	}
 
 	if userConfig.webhookFailOnError {
-		hook.failurePolicy = arv1beta1.Fail
+		hook.failurePolicy = arv1.Fail
 	}
 
 	if userConfig.webhookNamespaceSelector == "" {
@@ -194,7 +195,7 @@ func parseNamespaceSelector(selectorArg string) (*metav1.LabelSelector, error) {
 	for _, selectorStr := range selectorStrs {
 		kv := strings.SplitN(selectorStr, "=", 2)
 		if len(kv) != 2 || kv[0] == "" || kv[1] == "" {
-			return nil, fmt.Errorf("Webhook namespace selector must be in the form key1=value1,key2=value2")
+			return nil, fmt.Errorf("webhook namespace selector must be in the form key1=value1,key2=value2")
 		}
 		selector.MatchLabels[kv[0]] = kv[1]
 	}
@@ -228,7 +229,7 @@ func (wh *WebHook) Start(stopCh <-chan struct{}) error {
 func (wh *WebHook) Stop() error {
 	// Do not deregister if strict error handling is enabled; pod deletions are common, and we
 	// don't want to create windows where pods can be created without being subject to the webhook.
-	if wh.failurePolicy != arv1beta1.Fail {
+	if wh.failurePolicy != arv1.Fail {
 		if err := wh.selfDeregistration(userConfig.webhookConfigName); err != nil {
 			return err
 		}
@@ -265,14 +266,14 @@ func (wh *WebHook) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	review := &admissionv1beta1.AdmissionReview{}
+	review := &admissionv1.AdmissionReview{}
 	deserializer := codecs.UniversalDeserializer()
 	if _, _, err := deserializer.Decode(body, nil, review); err != nil {
 		internalError(w, err)
 		return
 	}
 	var whErr error
-	var reviewResponse *admissionv1beta1.AdmissionResponse
+	var reviewResponse *admissionv1.AdmissionResponse
 	switch review.Request.Resource {
 	case podResource:
 		reviewResponse, whErr = mutatePods(review, wh.lister, wh.sparkJobNamespace, wh.clientset)
@@ -297,9 +298,12 @@ func (wh *WebHook) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	response := admissionv1beta1.AdmissionReview{}
+	response := admissionv1.AdmissionReview{
+		TypeMeta: metav1.TypeMeta{APIVersion: "admission.k8s.io/v1", Kind: "AdmissionReview"},
+		Response: reviewResponse,
+	}
+
 	if reviewResponse != nil {
-		response.Response = reviewResponse
 		if review.Request != nil {
 			response.Response.UID = review.Request.UID
 		}
@@ -325,8 +329,8 @@ func internalError(w http.ResponseWriter, err error) {
 }
 
 func denyRequest(w http.ResponseWriter, reason string, code int) {
-	response := &admissionv1beta1.AdmissionReview{
-		Response: &admissionv1beta1.AdmissionResponse{
+	response := &admissionv1.AdmissionReview{
+		Response: &admissionv1.AdmissionResponse{
 			Allowed: false,
 			Result: &metav1.Status{
 				Code:    int32(code),
@@ -348,17 +352,17 @@ func denyRequest(w http.ResponseWriter, reason string, code int) {
 }
 
 func (wh *WebHook) selfRegistration(webhookConfigName string) error {
-	mwcClient := wh.clientset.AdmissionregistrationV1beta1().MutatingWebhookConfigurations()
-	vwcClient := wh.clientset.AdmissionregistrationV1beta1().ValidatingWebhookConfigurations()
+	mwcClient := wh.clientset.AdmissionregistrationV1().MutatingWebhookConfigurations()
+	vwcClient := wh.clientset.AdmissionregistrationV1().ValidatingWebhookConfigurations()
 	caCert, err := readCertFile(wh.certProvider.caCertFile)
 	if err != nil {
 		return err
 	}
 
-	mutatingRules := []v1beta1.RuleWithOperations{
+	mutatingRules := []arv1.RuleWithOperations{
 		{
-			Operations: []v1beta1.OperationType{v1beta1.Create},
-			Rule: v1beta1.Rule{
+			Operations: []arv1.OperationType{arv1.Create},
+			Rule: arv1.Rule{
 				APIGroups:   []string{""},
 				APIVersions: []string{"v1"},
 				Resources:   []string{"pods"},
@@ -366,10 +370,10 @@ func (wh *WebHook) selfRegistration(webhookConfigName string) error {
 		},
 	}
 
-	validatingRules := []v1beta1.RuleWithOperations{
+	validatingRules := []arv1.RuleWithOperations{
 		{
-			Operations: []v1beta1.OperationType{v1beta1.Create, v1beta1.Update},
-			Rule: v1beta1.Rule{
+			Operations: []arv1.OperationType{arv1.Create, arv1.Update},
+			Rule: arv1.Rule{
 				APIGroups:   []string{crdapi.GroupName},
 				APIVersions: []string{crdv1beta2.Version},
 				Resources:   []string{sparkApplicationResource.Resource, scheduledSparkApplicationResource.Resource},
@@ -377,30 +381,38 @@ func (wh *WebHook) selfRegistration(webhookConfigName string) error {
 		},
 	}
 
-	mutatingWebhook := v1beta1.MutatingWebhook{
+	sideEffect := arv1.SideEffectClassNoneOnDryRun
+
+	mutatingWebhook := arv1.MutatingWebhook{
 		Name:  webhookName,
 		Rules: mutatingRules,
-		ClientConfig: v1beta1.WebhookClientConfig{
+		ClientConfig: arv1.WebhookClientConfig{
 			Service:  wh.serviceRef,
 			CABundle: caCert,
 		},
-		FailurePolicy:     &wh.failurePolicy,
-		NamespaceSelector: wh.selector,
+		FailurePolicy:           &wh.failurePolicy,
+		NamespaceSelector:       wh.selector,
+		TimeoutSeconds:          wh.timeoutSeconds,
+		SideEffects:             &sideEffect,
+		AdmissionReviewVersions: []string{"v1"},
 	}
 
-	validatingWebhook := v1beta1.ValidatingWebhook{
+	validatingWebhook := arv1.ValidatingWebhook{
 		Name:  quotaWebhookName,
 		Rules: validatingRules,
-		ClientConfig: v1beta1.WebhookClientConfig{
+		ClientConfig: arv1.WebhookClientConfig{
 			Service:  wh.serviceRef,
 			CABundle: caCert,
 		},
-		FailurePolicy:     &wh.failurePolicy,
-		NamespaceSelector: wh.selector,
+		FailurePolicy:           &wh.failurePolicy,
+		NamespaceSelector:       wh.selector,
+		TimeoutSeconds:          wh.timeoutSeconds,
+		SideEffects:             &sideEffect,
+		AdmissionReviewVersions: []string{"v1"},
 	}
 
-	mutatingWebhooks := []v1beta1.MutatingWebhook{mutatingWebhook}
-	validatingWebhooks := []v1beta1.ValidatingWebhook{validatingWebhook}
+	mutatingWebhooks := []arv1.MutatingWebhook{mutatingWebhook}
+	validatingWebhooks := []arv1.ValidatingWebhook{validatingWebhook}
 
 	mutatingExisting, mutatingGetErr := mwcClient.Get(context.TODO(), webhookConfigName, metav1.GetOptions{})
 	if mutatingGetErr != nil {
@@ -409,7 +421,7 @@ func (wh *WebHook) selfRegistration(webhookConfigName string) error {
 		}
 		// Create case.
 		glog.Info("Creating a MutatingWebhookConfiguration for the Spark pod admission webhook")
-		webhookConfig := &v1beta1.MutatingWebhookConfiguration{
+		webhookConfig := &arv1.MutatingWebhookConfiguration{
 			ObjectMeta: metav1.ObjectMeta{
 				Name: webhookConfigName,
 			},
@@ -437,7 +449,7 @@ func (wh *WebHook) selfRegistration(webhookConfigName string) error {
 			}
 			// Create case.
 			glog.Info("Creating a ValidatingWebhookConfiguration for the SparkApplication resource quota enforcement webhook")
-			webhookConfig := &v1beta1.ValidatingWebhookConfiguration{
+			webhookConfig := &arv1.ValidatingWebhookConfiguration{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: webhookConfigName,
 				},
@@ -462,8 +474,8 @@ func (wh *WebHook) selfRegistration(webhookConfigName string) error {
 }
 
 func (wh *WebHook) selfDeregistration(webhookConfigName string) error {
-	mutatingConfigs := wh.clientset.AdmissionregistrationV1beta1().MutatingWebhookConfigurations()
-	validatingConfigs := wh.clientset.AdmissionregistrationV1beta1().ValidatingWebhookConfigurations()
+	mutatingConfigs := wh.clientset.AdmissionregistrationV1().MutatingWebhookConfigurations()
+	validatingConfigs := wh.clientset.AdmissionregistrationV1().ValidatingWebhookConfigurations()
 	if wh.enableResourceQuotaEnforcement {
 		err := validatingConfigs.Delete(context.TODO(), webhookConfigName, metav1.DeleteOptions{GracePeriodSeconds: int64ptr(0)})
 		if err != nil {
@@ -473,7 +485,7 @@ func (wh *WebHook) selfDeregistration(webhookConfigName string) error {
 	return mutatingConfigs.Delete(context.TODO(), webhookConfigName, metav1.DeleteOptions{GracePeriodSeconds: int64ptr(0)})
 }
 
-func admitSparkApplications(review *admissionv1beta1.AdmissionReview, enforcer resourceusage.ResourceQuotaEnforcer) (*admissionv1beta1.AdmissionResponse, error) {
+func admitSparkApplications(review *admissionv1.AdmissionReview, enforcer resourceusage.ResourceQuotaEnforcer) (*admissionv1.AdmissionResponse, error) {
 	if review.Request.Resource != sparkApplicationResource {
 		return nil, fmt.Errorf("expected resource to be %s, got %s", sparkApplicationResource, review.Request.Resource)
 	}
@@ -488,7 +500,7 @@ func admitSparkApplications(review *admissionv1beta1.AdmissionReview, enforcer r
 	if err != nil {
 		return nil, fmt.Errorf("resource quota enforcement failed for SparkApplication: %v", err)
 	}
-	response := &admissionv1beta1.AdmissionResponse{Allowed: reason == ""}
+	response := &admissionv1.AdmissionResponse{Allowed: reason == ""}
 	if reason != "" {
 		response.Result = &metav1.Status{
 			Message: reason,
@@ -498,7 +510,7 @@ func admitSparkApplications(review *admissionv1beta1.AdmissionReview, enforcer r
 	return response, nil
 }
 
-func admitScheduledSparkApplications(review *admissionv1beta1.AdmissionReview, enforcer resourceusage.ResourceQuotaEnforcer) (*admissionv1beta1.AdmissionResponse, error) {
+func admitScheduledSparkApplications(review *admissionv1.AdmissionReview, enforcer resourceusage.ResourceQuotaEnforcer) (*admissionv1.AdmissionResponse, error) {
 	if review.Request.Resource != scheduledSparkApplicationResource {
 		return nil, fmt.Errorf("expected resource to be %s, got %s", scheduledSparkApplicationResource, review.Request.Resource)
 	}
@@ -509,7 +521,7 @@ func admitScheduledSparkApplications(review *admissionv1beta1.AdmissionReview, e
 		return nil, fmt.Errorf("failed to unmarshal a ScheduledSparkApplication from the raw data in the admission request: %v", err)
 	}
 
-	response := &admissionv1beta1.AdmissionResponse{Allowed: true}
+	response := &admissionv1.AdmissionResponse{Allowed: true}
 	reason, err := enforcer.AdmitScheduledSparkApplication(*app)
 	if err != nil {
 		return nil, fmt.Errorf("resource quota enforcement failed for ScheduledSparkApplication: %v", err)
@@ -524,7 +536,7 @@ func admitScheduledSparkApplications(review *admissionv1beta1.AdmissionReview, e
 }
 
 func mutatePods(
-	review *admissionv1beta1.AdmissionReview,
+	review *admissionv1.AdmissionReview,
 	lister crdlisters.SparkApplicationLister,
 	sparkJobNs string, client kubernetes.Interface) (*admissionv1beta1.AdmissionResponse, error) {
 	raw := review.Request.Object.Raw
@@ -533,7 +545,7 @@ func mutatePods(
 		return nil, fmt.Errorf("failed to unmarshal a Pod from the raw data in the admission request: %v", err)
 	}
 
-	response := &admissionv1beta1.AdmissionResponse{Allowed: true}
+	response := &admissionv1.AdmissionResponse{Allowed: true}
 
 	if !isSparkPod(pod) || !inSparkJobNamespace(review.Request.Namespace, sparkJobNs) {
 		glog.V(2).Infof("Pod %s in namespace %s is not subject to mutation", pod.GetObjectMeta().GetName(), review.Request.Namespace)
@@ -559,7 +571,7 @@ func mutatePods(
 		}
 		glog.V(3).Infof("Pod %s mutation/patch result %s", pod.GetObjectMeta().GetName(), patchBytes)
 		response.Patch = patchBytes
-		patchType := admissionv1beta1.PatchTypeJSONPatch
+		patchType := admissionv1.PatchTypeJSONPatch
 		response.PatchType = &patchType
 	}
 
@@ -567,7 +579,7 @@ func mutatePods(
 }
 
 func inSparkJobNamespace(podNs string, sparkJobNamespace string) bool {
-	if sparkJobNamespace == apiv1.NamespaceAll {
+	if sparkJobNamespace == corev1.NamespaceAll {
 		return true
 	}
 	return podNs == sparkJobNamespace

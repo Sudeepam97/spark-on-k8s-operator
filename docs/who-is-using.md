@@ -8,11 +8,12 @@
 | StackTome | @emiliauskas-fuzzy | Production | Data pipelines |
 | Salesforce | @khogeland | Production | Data transformation |
 | Bringg | @EladDolev | Production | ML & Analytics Data Platform |
-| CERN | @mrow4a | Evaluation | Data Mining & Analytics |
-| Lyft | @kumare3 | Evaluation | ML & Data Infrastructure |
-| MapR Technologies | @sarjeet2013 | Evaluation | ML/AI & Analytics Data Platform |
-| Uber | @chenqin | Evaluation | Spark / ML |
-| HashmapInc | @prem0132 | Evaluation | Analytics Data Platform |
+| [Siigo](https://www.siigo.com) | @Juandavi1 | Production | Data Migrations & Analytics Data Platform |
+| CERN|@mrow4a| Evaluation | Data Mining & Analytics |
+| Lyft |@kumare3| Evaluation | ML & Data Infrastructure |
+| MapR Technologies |@sarjeet2013| Evaluation | ML/AI & Analytics Data Platform |
+| Uber| @chenqin| Evaluation| Spark / ML |
+| HashmapInc| @prem0132 | Evaluation | Analytics Data Platform |
 | Tencent | @runzhliu | Evaluation | ML Analytics Platform |
 | Exacaster | @minutis | Evaluation | Data pipelines |
 | Riskified | @henbh | Evaluation | Analytics Data Platform |
@@ -36,3 +37,5 @@
 | [Tongdun](https://www.tongdun.net/) | @lomoJG | Production | AI/ML & Analytics |
 | [Totvs Labs](https://www.totvslabs.com) | @luizm | Production | Data Platform |
 | [DiDi](https://www.didiglobal.com) | @Run-Lin | Evaluation | Data Infrastructure |
+| [DeepCure](https://www.deepcure.ai) | @mschroering | Production | Spark / ML |
+| [C2FO](https://www.c2fo.com/) | @vanhoale | Production | Data Platform / Data Infrastructure |

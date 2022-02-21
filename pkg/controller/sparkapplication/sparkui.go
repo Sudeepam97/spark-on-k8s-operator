@@ -27,12 +27,14 @@ import (
 
 	apiv1 "k8s.io/api/core/v1"
 	extensions "k8s.io/api/extensions/v1beta1"
+	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	clientset "k8s.io/client-go/kubernetes"
 
 	"github.com/GoogleCloudPlatform/spark-on-k8s-operator/pkg/apis/sparkoperator.k8s.io/v1beta2"
 	"github.com/GoogleCloudPlatform/spark-on-k8s-operator/pkg/config"
+	"github.com/GoogleCloudPlatform/spark-on-k8s-operator/pkg/util"
 )
 
 const (
@@ -44,8 +46,20 @@ const (
 var ingressAppNameURLRegex = regexp.MustCompile("{{\\s*[$]appName\\s*}}")
 var ingressAppNamespaceURLRegex = regexp.MustCompile("{{\\s*[$]appNamespace\\s*}}")
 
-func getSparkUIingressURL(ingressURLFormat string, appName string, appNamespace string) string {
-	return ingressAppNamespaceURLRegex.ReplaceAllString(ingressAppNameURLRegex.ReplaceAllString(ingressURLFormat, appName), appNamespace)
+func getSparkUIingressURL(ingressURLFormat string, appName string, appNamespace string) (*url.URL, error) {
+	ingressURL := ingressAppNamespaceURLRegex.ReplaceAllString(ingressAppNameURLRegex.ReplaceAllString(ingressURLFormat, appName), appNamespace)
+	parsedURL, err := url.Parse(ingressURL)
+	if err != nil {
+		return nil, err
+	}
+	if parsedURL.Scheme == "" {
+		//url does not contain any scheme, adding http:// so url.Parse can function correctly
+		parsedURL, err = url.Parse("http://" + ingressURL)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return parsedURL, nil
 }
 
 // SparkService encapsulates information about the driver UI service.
@@ -62,26 +76,98 @@ type SparkService struct {
 // SparkIngress encapsulates information about the driver UI ingress.
 type SparkIngress struct {
 	ingressName string
-	ingressURL  string
+	ingressURL  *url.URL
 	annotations map[string]string
-	ingressTLS  []extensions.IngressTLS
+	ingressTLS  []networkingv1.IngressTLS
 }
 
-func createSparkUIIngress(app *v1beta2.SparkApplication, service SparkService, ingressURLFormat string, kubeClient clientset.Interface) (*SparkIngress, error) {
-	ingressURL := getSparkUIingressURL(ingressURLFormat, app.GetName(), app.GetNamespace())
+func createSparkUIIngress(app *v1beta2.SparkApplication, service SparkService, ingressURL *url.URL, kubeClient clientset.Interface) (*SparkIngress, error) {
+	if util.IngressCapabilities.Has("networking.k8s.io/v1") {
+		return createSparkUIIngress_v1(app, service, ingressURL, kubeClient)
+	} else {
+		return createSparkUIIngress_legacy(app, service, ingressURL, kubeClient)
+	}
+}
+
+func createSparkUIIngress_v1(app *v1beta2.SparkApplication, service SparkService, ingressURL *url.URL, kubeClient clientset.Interface) (*SparkIngress, error) {
 	ingressResourceAnnotations := getIngressResourceAnnotations(app)
 	ingressTlsHosts := getIngressTlsHosts(app)
 
-	parsedURL, err := url.Parse(ingressURL)
+	ingressURLPath := ingressURL.Path
+	// If we're serving on a subpath, we need to ensure we create capture groups
+	if ingressURLPath != "" && ingressURLPath != "/" {
+		ingressURLPath = ingressURLPath + "(/|$)(.*)"
+	}
+
+	implementationSpecific := networkingv1.PathTypeImplementationSpecific
+
+	ingress := networkingv1.Ingress{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            getDefaultUIIngressName(app),
+			Namespace:       app.Namespace,
+			Labels:          getResourceLabels(app),
+			OwnerReferences: []metav1.OwnerReference{*getOwnerReference(app)},
+		},
+		Spec: networkingv1.IngressSpec{
+			Rules: []networkingv1.IngressRule{{
+				Host: ingressURL.Host,
+				IngressRuleValue: networkingv1.IngressRuleValue{
+					HTTP: &networkingv1.HTTPIngressRuleValue{
+						Paths: []networkingv1.HTTPIngressPath{{
+							Backend: networkingv1.IngressBackend{
+								Service: &networkingv1.IngressServiceBackend{
+									Name: service.serviceName,
+									Port: networkingv1.ServiceBackendPort{
+										Number: service.servicePort,
+									},
+								},
+							},
+							Path:     ingressURLPath,
+							PathType: &implementationSpecific,
+						}},
+					},
+				},
+			}},
+		},
+	}
+
+	if len(ingressResourceAnnotations) != 0 {
+		ingress.ObjectMeta.Annotations = ingressResourceAnnotations
+	}
+
+	// If we're serving on a subpath, we need to ensure we use the capture groups
+	if ingressURL.Path != "" && ingressURL.Path != "/" {
+		if ingress.ObjectMeta.Annotations == nil {
+			ingress.ObjectMeta.Annotations = make(map[string]string)
+		}
+		ingress.ObjectMeta.Annotations["nginx.ingress.kubernetes.io/rewrite-target"] = "/$2"
+	}
+	if len(ingressTlsHosts) != 0 {
+		ingress.Spec.TLS = ingressTlsHosts
+	}
+	glog.Infof("Creating an Ingress %s for the Spark UI for application %s", ingress.Name, app.Name)
+	_, err := kubeClient.NetworkingV1().Ingresses(ingress.Namespace).Create(context.TODO(), &ingress, metav1.CreateOptions{})
 	if err != nil {
 		return nil, err
 	}
-	if parsedURL.Scheme == "" {
-		//url does not contain any scheme, adding http:// so url.Parse can function correctly
-		parsedURL, err = url.Parse("http://" + ingressURL)
-		if err != nil {
-			return nil, err
-		}
+	return &SparkIngress{
+		ingressName: ingress.Name,
+		ingressURL:  ingressURL,
+		annotations: ingress.Annotations,
+		ingressTLS:  ingressTlsHosts,
+	}, nil
+}
+
+func createSparkUIIngress_legacy(app *v1beta2.SparkApplication, service SparkService, ingressURL *url.URL, kubeClient clientset.Interface) (*SparkIngress, error) {
+	ingressResourceAnnotations := getIngressResourceAnnotations(app)
+	// var ingressTlsHosts networkingv1.IngressTLS[]
+	// That we convert later for extensionsv1beta1, but return as is in SparkIngress
+	ingressTlsHosts := getIngressTlsHosts(app)
+
+	ingressURLPath := ingressURL.Path
+	// If we're serving on a subpath, we need to ensure we create capture groups
+	if ingressURLPath != "" && ingressURLPath != "/" {
+		ingressURLPath = ingressURLPath + "(/|$)(.*)"
 	}
 
 	ingress := extensions.Ingress{
@@ -93,7 +179,7 @@ func createSparkUIIngress(app *v1beta2.SparkApplication, service SparkService, i
 		},
 		Spec: extensions.IngressSpec{
 			Rules: []extensions.IngressRule{{
-				Host: parsedURL.Host,
+				Host: ingressURL.Host,
 				IngressRuleValue: extensions.IngressRuleValue{
 					HTTP: &extensions.HTTPIngressRuleValue{
 						Paths: []extensions.HTTPIngressPath{{
@@ -104,7 +190,7 @@ func createSparkUIIngress(app *v1beta2.SparkApplication, service SparkService, i
 									IntVal: service.servicePort,
 								},
 							},
-							Path: parsedURL.Path,
+							Path: ingressURLPath,
 						}},
 					},
 				},
@@ -115,12 +201,19 @@ func createSparkUIIngress(app *v1beta2.SparkApplication, service SparkService, i
 	if len(ingressResourceAnnotations) != 0 {
 		ingress.ObjectMeta.Annotations = ingressResourceAnnotations
 	}
-	if len(ingressTlsHosts) != 0 {
-		ingress.Spec.TLS = ingressTlsHosts
-	}
-	glog.Infof("Creating an Ingress %s for the Spark UI for application %s", ingress.Name, app.Name)
-	_, err = kubeClient.ExtensionsV1beta1().Ingresses(ingress.Namespace).Create(context.TODO(), &ingress, metav1.CreateOptions{})
 
+	// If we're serving on a subpath, we need to ensure we use the capture groups
+	if ingressURL.Path != "" && ingressURL.Path != "/" {
+		if ingress.ObjectMeta.Annotations == nil {
+			ingress.ObjectMeta.Annotations = make(map[string]string)
+		}
+		ingress.ObjectMeta.Annotations["nginx.ingress.kubernetes.io/rewrite-target"] = "/$2"
+	}
+	if len(ingressTlsHosts) != 0 {
+		ingress.Spec.TLS = convertIngressTlsHostsToLegacy(ingressTlsHosts)
+	}
+	glog.Infof("Creating an extensions/v1beta1 Ingress %s for the Spark UI for application %s", ingress.Name, app.Name)
+	_, err := kubeClient.ExtensionsV1beta1().Ingresses(ingress.Namespace).Create(context.TODO(), &ingress, metav1.CreateOptions{})
 	if err != nil {
 		return nil, err
 	}
@@ -128,8 +221,19 @@ func createSparkUIIngress(app *v1beta2.SparkApplication, service SparkService, i
 		ingressName: ingress.Name,
 		ingressURL:  ingressURL,
 		annotations: ingress.Annotations,
-		ingressTLS:  ingress.Spec.TLS,
+		ingressTLS:  ingressTlsHosts,
 	}, nil
+}
+
+func convertIngressTlsHostsToLegacy(ingressTlsHosts []networkingv1.IngressTLS) []extensions.IngressTLS {
+	var ingressTlsHosts_legacy []extensions.IngressTLS
+	for _, ingressTlsHost := range ingressTlsHosts {
+		ingressTlsHosts_legacy = append(ingressTlsHosts_legacy, extensions.IngressTLS{
+			Hosts:      ingressTlsHost.Hosts,
+			SecretName: ingressTlsHost.SecretName,
+		})
+	}
+	return ingressTlsHosts_legacy
 }
 
 func createSparkUIService(
