@@ -24,12 +24,12 @@ import (
 	jsonpatch "github.com/evanphx/json-patch"
 	"github.com/stretchr/testify/assert"
 
+	"github.com/GoogleCloudPlatform/spark-on-k8s-operator/pkg/apis/sparkoperator.k8s.io/v1beta2"
+	"github.com/GoogleCloudPlatform/spark-on-k8s-operator/pkg/config"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
-	"github.com/GoogleCloudPlatform/spark-on-k8s-operator/pkg/apis/sparkoperator.k8s.io/v1beta2"
-	"github.com/GoogleCloudPlatform/spark-on-k8s-operator/pkg/config"
+	kubeclientfake "k8s.io/client-go/kubernetes/fake"
 )
 
 func TestPatchSparkPod_OwnerReference(t *testing.T) {
@@ -1792,7 +1792,8 @@ func TestPatchSparkPod_Lifecycle(t *testing.T) {
 }
 
 func getModifiedPod(pod *corev1.Pod, app *v1beta2.SparkApplication) (*corev1.Pod, error) {
-	patchOps := patchSparkPod(pod.DeepCopy(), app)
+	fakeClient := kubeclientfake.NewSimpleClientset()
+	patchOps := patchSparkPod(pod.DeepCopy(), app, fakeClient)
 	patchBytes, err := json.Marshal(patchOps)
 	if err != nil {
 		return nil, err
